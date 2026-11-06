@@ -469,32 +469,119 @@ function App() {
             {!loading && customers.length === 0 && <p>No customers found.</p>}
           </section>
         )}
+{activeTab === 'inventory' && (
+  <div style={{padding: '20px'}}>
+    <h1 style={{textAlign: 'center', marginBottom: '30px'}}>Inventory</h1>
 
-        {activeTab === 'stock' && (
-          <section>
-            <h1>Inventory</h1>
-            {products.map((product, index) => (
-              <div
-                key={product.id ?? product.product_id ?? index}
-                style={rowStyle}
-              >
-                <span>
-                  {product.name ?? product.product_name ?? 'Unnamed product'}
-                </span>
-                <span>Price: {money(product.price)}</span>
-                <span>
-                  Stock: {product.stock ?? product.quantity ?? 'Not provided'}
-                </span>
-              </div>
-            ))}
-            {!loading && products.length === 0 && <p>No inventory found.</p>}
-          </section>
-        )}
-      </main>
+    {/* ADD PRODUCT FORM */}
+    <div style={{
+      background: '#f8fafc',
+      padding: '25px',
+      borderRadius: '10px',
+      marginBottom: '30px',
+      maxWidth: '600px',
+      marginLeft: 'auto',
+      marginRight: 'auto'
+    }}>
+      <h3 style={{marginTop: 0, color: '#1e40af'}}>➕ Add New Product</h3>
+      <form onSubmit={async (e) => {
+        e.preventDefault();
+        const form = new FormData(e.target);
+        
+        try {
+          const res = await fetch(`${API_BASE}/products`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              name: form.get('name'),
+              code: form.get('code'),
+              price: Number(form.get('price')),
+              cost_price: Number(form.get('cost_price')) || 0,
+              stock: Number(form.get('stock')) || 0,
+              category: form.get('category') || 'General'
+            })
+          });
+
+          if (res.ok) {
+            alert('✅ Product added successfully!');
+            e.target.reset();
+            // Refresh product list
+            fetchProducts();
+          } else {
+            const data = await res.json();
+            alert('❌ Error: ' + (data.error || 'Failed to add'));
+          }
+        } catch (err) {
+          alert('❌ Network error — check connection');
+        }
+      }}>
+        <div style={{marginBottom: '12px'}}>
+          <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Product Name</label>
+          <input name="name" required style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} placeholder="e.g. Samsung Galaxy S24" />
+        </div>
+
+        <div style={{marginBottom: '12px'}}>
+          <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Product Code</label>
+          <input name="code" required style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} placeholder="e.g. SAM-S24 (no spaces)" />
+        </div>
+
+        <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px'}}>
+          <div>
+            <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Selling Price (Rs)</label>
+            <input name="price" type="number" step="0.01" required style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} />
+          </div>
+          <div>
+            <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Cost Price (Rs)</label>
+            <input name="cost_price" type="number" step="0.01" style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} />
+          </div>
+        </div>
+
+        <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '15px'}}>
+          <div>
+            <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Stock Quantity</label>
+            <input name="stock" type="number" required style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} />
+          </div>
+          <div>
+            <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Category</label>
+            <input name="category" style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} placeholder="e.g. Phones / Chargers" />
+          </div>
+        </div>
+
+        <button type="submit" style={{
+          background: '#16a34a',
+          color: 'white',
+          border: 'none',
+          padding: '12px 24px',
+          borderRadius: '6px',
+          fontSize: '15px',
+          cursor: 'pointer',
+          width: '100%'
+        }}>
+          ✅ Save Product
+        </button>
+      </form>
     </div>
-  );
-}
 
+    {/* PRODUCT LIST */}
+    <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '15px'}}>
+      {products.map(p => (
+        <div key={p.id} style={{
+          padding: '20px',
+          border: '1px solid #e2e8f0',
+          borderRadius: '8px',
+          background: 'white'
+        }}>
+          <h4 style={{margin: '0 0 8px 0', fontSize: '16px'}}>{p.name}</h4>
+          <p style={{margin: '4px 0', color: '#64748b', fontSize: '13px'}}>Code: {p.code}</p>
+          <p style={{margin: '8px 0', fontSize: '18px', fontWeight: 'bold', color: '#1e40af'}}>Rs. {Number(p.price).toLocaleString()}</p>
+          <p style={{margin: '4px 0', color: p.stock <= 5 ? '#dc2626' : '#16a34a'}}>
+            Stock: {p.stock} {p.stock <= 5 && '⚠️ Low Stock'}
+          </p>
+        </div>
+      ))}
+    </div>
+  </div>
+}
 const cardStyle = {
   background: 'white',
   padding: '25px',
