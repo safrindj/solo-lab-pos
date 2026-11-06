@@ -247,5 +247,18 @@ app.post('/api/customers', async (req, res) => {
     res.json({ success: true, id: result.insertId });
   } catch (e) { res.status(500).json({error: e.message}); }
 });
-
+// Add New Product
+app.post('/api/products', async (req, res) => {
+  const { name, code, price, cost_price, stock, category } = req.body;
+  try {
+    const [result] = await db.query(
+      `INSERT INTO products (name, code, price, cost_price, stock, category)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [name, code, price, cost_price || 0, stock || 0, category || 'General']
+    );
+    res.json({ success: true, id: result.insertId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.listen(PORT, () => console.log(`🚀 POS Backend running on port ${PORT}`));
