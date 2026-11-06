@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-// Set VITE_API_BASE_URL in your deployment environment when the API is hosted
-// separately. Otherwise, production requests use the same-origin /api path.
-const API_BASE = import.meta.env.DEV
-  ? 'http://localhost:5000/api'
-  : 'https://solo-lab-pos-ytbo.vercel.app/api';
-//                                              ↑ NO trailing slash here
+// Set VITE_API_BASE_URL when the API is hosted separately.
+// Otherwise, use localhost during development and same-origin /api in production.
+const API_BASE = (
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.DEV ? 'http://localhost:5000/api' : '/api')
+).replace(/\/+$/, '');
+
 async function apiRequest(path, options) {
   const response = await fetch(`${API_BASE}${path}`, options);
   const text = await response.text();
@@ -20,7 +21,7 @@ async function apiRequest(path, options) {
   }
 
   if (!response.ok) {
-    throw new Error(data?.message || `Request failed (${response.status}).`);
+    throw new Error(data?.message || data?.error || `Request failed (${response.status}).`);
   }
 
   return data;
@@ -31,6 +32,37 @@ function getList(data, key) {
   if (Array.isArray(data?.[key])) return data[key];
   return [];
 }
+
+const cardStyle = {
+  background: 'white',
+  padding: '25px',
+  borderRadius: '12px',
+  boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+};
+
+const cardHeadingStyle = {
+  color: '#64748b',
+  fontSize: '14px',
+  margin: 0,
+};
+
+const metricStyle = {
+  fontSize: '30px',
+  fontWeight: 'bold',
+  margin: '10px 0',
+};
+
+const rowStyle = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  gap: '12px',
+  padding: '12px',
+  marginBottom: '8px',
+  background: 'white',
+  borderRadius: '8px',
+};
 
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -44,8 +76,13 @@ function App() {
   const [paymentMethod, setPaymentMethod] = useState('Cash Payment');
   const [cashGiven, setCashGiven] = useState('');
   const [error, setError] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [submittingSale, setSubmittingSale] = useState(false);
+  const [savingProduct, setSavingProduct] = useState(false);
+
+  // Ignore stale product-search responses when the user types quickly.
+  const productRequestId = useRef(0);
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -57,16 +94,26 @@ function App() {
   }, []);
 
   const loadProducts = useCallback(async () => {
+    const requestId = ++productRequestId.current;
+
     try {
       setError('');
       setLoading(true);
       const query = new URLSearchParams({ search: searchTerm });
-      setProducts(getList(await apiRequest(`/products?${query}`), 'products'));
+      const data = await apiRequest(`/products?${query}`);
+
+      if (requestId === productRequestId.current) {
+        setProducts(getList(data, 'products'));
+      }
     } catch (err) {
-      setError(err.message);
-      setProducts([]);
+      if (requestId === productRequestId.current) {
+        setError(err.message);
+        setProducts([]);
+      }
     } finally {
-      setLoading(false);
+      if (requestId === productRequestId.current) {
+        setLoading(false);
+      }
     }
   }, [searchTerm]);
 
@@ -96,7 +143,6 @@ function App() {
     }
   }, []);
 
-  // A single effect handles tab loading and POS search changes.
   useEffect(() => {
     if (activeTab === 'dashboard') loadDashboard();
     if (activeTab === 'pos' || activeTab === 'stock') loadProducts();
@@ -113,10 +159,13 @@ function App() {
 
   const addToCart = (product) => {
     const productId = product.id ?? product.product_id;
+
     if (productId == null) {
       setError('This product has no ID and cannot be added to the cart.');
       return;
     }
+
+    setError('');
 
     setCart((previousCart) => {
       const existing = previousCart.find(
@@ -147,16 +196,19 @@ function App() {
     (sum, item) => sum + (Number(item.price) || 0) * item.qty,
     0
   );
+
   const discountAmount = Math.min(
     subtotal,
     Math.max(0, Number(discount) || 0)
   );
+
   const grandTotal = Math.max(0, subtotal - discountAmount);
   const cashAmount = Math.max(0, Number(cashGiven) || 0);
   const change = cashAmount - grandTotal;
 
   const completeSale = async () => {
     setError('');
+    setSuccessMessage('');
 
     if (cart.length === 0) {
       setError('Add at least one product before completing a sale.');
@@ -170,6 +222,7 @@ function App() {
 
     try {
       setSubmittingSale(true);
+
       await apiRequest('/sales', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -185,17 +238,51 @@ function App() {
         }),
       });
 
-      window.alert('Sale completed successfully.');
+      setSuccessMessage('Sale completed successfully.');
       setCart([]);
       setDiscount('0');
       setCashGiven('');
 
-      // Refresh dashboard figures after a successful sale.
-      if (activeTab === 'dashboard') await loadDashboard();
+      // Keep the dashboard figures up to date after a sale.
+      await loadDashboard();
     } catch (err) {
       setError(err.message);
     } finally {
       setSubmittingSale(false);
+    }
+  };
+
+  const addProduct = async (event) => {
+    event.preventDefault();
+
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+
+    setError('');
+    setSuccessMessage('');
+    setSavingProduct(true);
+
+    try {
+      await apiRequest('/products', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.get('name'),
+          code: form.get('code'),
+          price: Number(form.get('price')),
+          cost_price: Number(form.get('cost_price')) || 0,
+          stock: Number(form.get('stock')) || 0,
+          category: form.get('category') || 'General',
+        }),
+      });
+
+      formElement.reset();
+      await loadProducts();
+      setSuccessMessage('Product added successfully.');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingProduct(false);
     }
   };
 
@@ -284,6 +371,21 @@ function App() {
           </div>
         )}
 
+        {successMessage && (
+          <div
+            role="status"
+            style={{
+              padding: '12px 16px',
+              marginBottom: '20px',
+              color: '#166534',
+              background: '#dcfce7',
+              borderRadius: '8px',
+            }}
+          >
+            {successMessage}
+          </div>
+        )}
+
         {loading && <p role="status">Loading…</p>}
 
         {activeTab === 'dashboard' && (
@@ -347,9 +449,14 @@ function App() {
               <div>
                 <h2>Products</h2>
                 {products.map((product) => (
-                  <div key={product.id ?? product.product_id} style={rowStyle}>
+                  <div
+                    key={product.id ?? product.product_id}
+                    style={rowStyle}
+                  >
                     <span>
-                      {product.name ?? product.product_name ?? 'Unnamed product'}
+                      {product.name ??
+                        product.product_name ??
+                        'Unnamed product'}
                       {' — '}
                       {money(product.price)}
                     </span>
@@ -365,10 +472,12 @@ function App() {
                 <h2>Cart</h2>
                 {cart.map((item) => {
                   const id = item.id ?? item.product_id;
+
                   return (
                     <div key={id} style={rowStyle}>
                       <span>
-                        {item.name ?? item.product_name ?? 'Product'} × {item.qty}
+                        {item.name ?? item.product_name ?? 'Product'} ×{' '}
+                        {item.qty}
                       </span>
                       <span>{money((Number(item.price) || 0) * item.qty)}</span>
                       <button type="button" onClick={() => removeFromCart(id)}>
@@ -414,7 +523,9 @@ function App() {
                           min="0"
                           step="0.01"
                           value={cashGiven}
-                          onChange={(event) => setCashGiven(event.target.value)}
+                          onChange={(event) =>
+                            setCashGiven(event.target.value)
+                          }
                         />
                       </label>
                     </div>
@@ -438,10 +549,11 @@ function App() {
           <section>
             <h1>Sales History</h1>
             {sales.map((sale, index) => (
-              <div key={sale.id ?? sale.sale_id ?? index} style={rowStyle}>
-                <span>
-                  Sale #{sale.id ?? sale.sale_id ?? index + 1}
-                </span>
+              <div
+                key={sale.id ?? sale.sale_id ?? index}
+                style={rowStyle}
+              >
+                <span>Sale #{sale.id ?? sale.sale_id ?? index + 1}</span>
                 <span>
                   {money(sale.grand_total ?? sale.total ?? sale.amount)}
                 </span>
@@ -461,7 +573,9 @@ function App() {
                 style={rowStyle}
               >
                 <span>
-                  {customer.name ?? customer.customer_name ?? 'Unnamed customer'}
+                  {customer.name ??
+                    customer.customer_name ??
+                    'Unnamed customer'}
                 </span>
                 <span>{customer.phone ?? customer.email ?? ''}</span>
               </div>
@@ -469,148 +583,243 @@ function App() {
             {!loading && customers.length === 0 && <p>No customers found.</p>}
           </section>
         )}
-{activeTab === 'inventory' && (
-  <div style={{padding: '20px'}}>
-    <h1 style={{textAlign: 'center', marginBottom: '30px'}}>Inventory</h1>
 
-    {/* ADD PRODUCT FORM */}
-    <div style={{
-      background: '#f8fafc',
-      padding: '25px',
-      borderRadius: '10px',
-      marginBottom: '30px',
-      maxWidth: '600px',
-      marginLeft: 'auto',
-      marginRight: 'auto'
-    }}>
-      <h3 style={{marginTop: 0, color: '#1e40af'}}>➕ Add New Product</h3>
-      <form onSubmit={async (e) => {
-        e.preventDefault();
-        const form = new FormData(e.target);
-        
-        try {
-          const res = await fetch(`${API_BASE}/products`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              name: form.get('name'),
-              code: form.get('code'),
-              price: Number(form.get('price')),
-              cost_price: Number(form.get('cost_price')) || 0,
-              stock: Number(form.get('stock')) || 0,
-              category: form.get('category') || 'General'
-            })
-          });
+        {activeTab === 'stock' && (
+          <section style={{ padding: '20px' }}>
+            <h1 style={{ textAlign: 'center', marginBottom: '30px' }}>
+              Inventory
+            </h1>
 
-          if (res.ok) {
-            alert('✅ Product added successfully!');
-            e.target.reset();
-            // Refresh product list
-            fetchProducts();
-          } else {
-            const data = await res.json();
-            alert('❌ Error: ' + (data.error || 'Failed to add'));
-          }
-        } catch (err) {
-          alert('❌ Network error — check connection');
-        }
-      }}>
-        <div style={{marginBottom: '12px'}}>
-          <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Product Name</label>
-          <input name="name" required style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} placeholder="e.g. Samsung Galaxy S24" />
-        </div>
+            <div
+              style={{
+                background: 'white',
+                padding: '25px',
+                borderRadius: '10px',
+                marginBottom: '30px',
+                maxWidth: '600px',
+                marginLeft: 'auto',
+                marginRight: 'auto',
+              }}
+            >
+              <h3 style={{ marginTop: 0, color: '#1e40af' }}>
+                ➕ Add New Product
+              </h3>
 
-        <div style={{marginBottom: '12px'}}>
-          <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Product Code</label>
-          <input name="code" required style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} placeholder="e.g. SAM-S24 (no spaces)" />
-        </div>
+              <form onSubmit={addProduct}>
+                <div style={{ marginBottom: '12px' }}>
+                  <label
+                    htmlFor="product-name"
+                    style={{
+                      display: 'block',
+                      fontWeight: 500,
+                      marginBottom: '4px',
+                    }}
+                  >
+                    Product Name
+                  </label>
+                  <input
+                    id="product-name"
+                    name="name"
+                    required
+                    style={formInputStyle}
+                    placeholder="e.g. Samsung Galaxy S24"
+                  />
+                </div>
 
-        <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px'}}>
-          <div>
-            <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Selling Price (Rs)</label>
-            <input name="price" type="number" step="0.01" required style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} />
-          </div>
-          <div>
-            <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Cost Price (Rs)</label>
-            <input name="cost_price" type="number" step="0.01" style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} />
-          </div>
-        </div>
+                <div style={{ marginBottom: '12px' }}>
+                  <label
+                    htmlFor="product-code"
+                    style={{
+                      display: 'block',
+                      fontWeight: 500,
+                      marginBottom: '4px',
+                    }}
+                  >
+                    Product Code
+                  </label>
+                  <input
+                    id="product-code"
+                    name="code"
+                    required
+                    style={formInputStyle}
+                    placeholder="e.g. SAM-S24 (no spaces)"
+                  />
+                </div>
 
-        <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '15px'}}>
-          <div>
-            <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Stock Quantity</label>
-            <input name="stock" type="number" required style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} />
-          </div>
-          <div>
-            <label style={{display: 'block', fontWeight: 500, marginBottom: '4px'}}>Category</label>
-            <input name="category" style={{width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #cbd5e1'}} placeholder="e.g. Phones / Chargers" />
-          </div>
-        </div>
+                <div style={formGridStyle}>
+                  <div>
+                    <label
+                      htmlFor="product-price"
+                      style={formLabelStyle}
+                    >
+                      Selling Price (Rs)
+                    </label>
+                    <input
+                      id="product-price"
+                      name="price"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      required
+                      style={formInputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="product-cost-price"
+                      style={formLabelStyle}
+                    >
+                      Cost Price (Rs)
+                    </label>
+                    <input
+                      id="product-cost-price"
+                      name="cost_price"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      style={formInputStyle}
+                    />
+                  </div>
+                </div>
 
-        <button type="submit" style={{
-          background: '#16a34a',
-          color: 'white',
-          border: 'none',
-          padding: '12px 24px',
-          borderRadius: '6px',
-          fontSize: '15px',
-          cursor: 'pointer',
-          width: '100%'
-        }}>
-          ✅ Save Product
-        </button>
-      </form>
+                <div style={formGridStyle}>
+                  <div>
+                    <label
+                      htmlFor="product-stock"
+                      style={formLabelStyle}
+                    >
+                      Stock Quantity
+                    </label>
+                    <input
+                      id="product-stock"
+                      name="stock"
+                      type="number"
+                      min="0"
+                      step="1"
+                      required
+                      style={formInputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="product-category"
+                      style={formLabelStyle}
+                    >
+                      Category
+                    </label>
+                    <input
+                      id="product-category"
+                      name="category"
+                      style={formInputStyle}
+                      placeholder="e.g. Phones / Chargers"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={savingProduct}
+                  style={{
+                    background: '#16a34a',
+                    color: 'white',
+                    border: 'none',
+                    padding: '12px 24px',
+                    borderRadius: '6px',
+                    fontSize: '15px',
+                    cursor: savingProduct ? 'wait' : 'pointer',
+                    width: '100%',
+                  }}
+                >
+                  {savingProduct ? 'Saving…' : '✅ Save Product'}
+                </button>
+              </form>
+            </div>
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                gap: '15px',
+              }}
+            >
+              {products.map((product, index) => {
+                const stock = Number(
+                  product.stock ?? product.quantity ?? 0
+                );
+
+                return (
+                  <div
+                    key={product.id ?? product.product_id ?? index}
+                    style={{
+                      padding: '20px',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '8px',
+                      background: 'white',
+                    }}
+                  >
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: '16px' }}>
+                      {product.name ??
+                        product.product_name ??
+                        'Unnamed product'}
+                    </h4>
+                    <p
+                      style={{
+                        margin: '4px 0',
+                        color: '#64748b',
+                        fontSize: '13px',
+                      }}
+                    >
+                      Code: {product.code ?? product.product_code ?? '—'}
+                    </p>
+                    <p
+                      style={{
+                        margin: '8px 0',
+                        fontSize: '18px',
+                        fontWeight: 'bold',
+                        color: '#1e40af',
+                      }}
+                    >
+                      {money(product.price)}
+                    </p>
+                    <p
+                      style={{
+                        margin: '4px 0',
+                        color: stock <= 5 ? '#dc2626' : '#16a34a',
+                      }}
+                    >
+                      Stock: {stock} {stock <= 5 && '⚠️ Low Stock'}
+                    </p>
+                  </div>
+                );
+              })}
+              {!loading && products.length === 0 && <p>No products found.</p>}
+            </div>
+          </section>
+        )}
+      </main>
     </div>
-
-    {/* PRODUCT LIST */}
-    <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '15px'}}>
-      {products.map(p => (
-        <div key={p.id} style={{
-          padding: '20px',
-          border: '1px solid #e2e8f0',
-          borderRadius: '8px',
-          background: 'white'
-        }}>
-          <h4 style={{margin: '0 0 8px 0', fontSize: '16px'}}>{p.name}</h4>
-          <p style={{margin: '4px 0', color: '#64748b', fontSize: '13px'}}>Code: {p.code}</p>
-          <p style={{margin: '8px 0', fontSize: '18px', fontWeight: 'bold', color: '#1e40af'}}>Rs. {Number(p.price).toLocaleString()}</p>
-          <p style={{margin: '4px 0', color: p.stock <= 5 ? '#dc2626' : '#16a34a'}}>
-            Stock: {p.stock} {p.stock <= 5 && '⚠️ Low Stock'}
-          </p>
-        </div>
-      ))}
-    </div>
-  </div>
+  );
 }
-const cardStyle = {
-  background: 'white',
-  padding: '25px',
-  borderRadius: '12px',
-  boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+
+const formInputStyle = {
+  width: '100%',
+  padding: '10px',
+  borderRadius: '5px',
+  border: '1px solid #cbd5e1',
+  boxSizing: 'border-box',
 };
 
-const cardHeadingStyle = {
-  color: '#64748b',
-  fontSize: '14px',
-  margin: 0,
+const formLabelStyle = {
+  display: 'block',
+  fontWeight: 500,
+  marginBottom: '4px',
 };
 
-const metricStyle = {
-  fontSize: '30px',
-  fontWeight: 'bold',
-  margin: '10px 0',
-};
-
-const rowStyle = {
-  display: 'flex',
-  flexWrap: 'wrap',
-  justifyContent: 'space-between',
-  alignItems: 'center',
+const formGridStyle = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
   gap: '12px',
-  padding: '12px',
-  marginBottom: '8px',
-  background: 'white',
-  borderRadius: '8px',
+  marginBottom: '12px',
 };
 
 export default App;
