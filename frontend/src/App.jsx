@@ -4,8 +4,8 @@ import { useCallback, useEffect, useState } from 'react';
 // separately. Otherwise, production requests use the same-origin /api path.
 const API_BASE = import.meta.env.DEV
   ? 'http://localhost:5000/api'
-  : 'https://YOUR-BACKEND-NAME.vercel.app/api';
-
+  : 'https://solo-lab-pos-ytbo.vercel.app/api';
+//                                              ↑ NO trailing slash here
 async function apiRequest(path, options) {
   const response = await fetch(`${API_BASE}${path}`, options);
   const text = await response.text();
