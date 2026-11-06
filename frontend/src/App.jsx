@@ -1,4 +1,18 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+const API_BASE = import.meta.env.DEV
+  ? 'http://localhost:5000/api'
+  : 'https://solo-lab-pos-backend.vercel.app/api';
+
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+
+  return response.json();
+}
 
 function App() {
   const [products, setProducts] = useState([]);
@@ -9,54 +23,145 @@ function App() {
   const [paymentMethod, setPaymentMethod] = useState('Cash Payment');
   const [activeTab, setActiveTab] = useState('pos');
   const [sales, setSales] = useState([]);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [loadingSales, setLoadingSales] = useState(false);
+  const [savingSale, setSavingSale] = useState(false);
+  const [error, setError] = useState('');
+
   const searchInput = useRef(null);
+  const savingSaleRef = useRef(false);
+
+  const subtotal = cart.reduce(
+    (sum, item) => sum + (Number(item.price) || 0) * item.qty,
+    0
+  );
+  const grandTotal = Math.max(0, subtotal - discount);
+  const numericCash = Number(cashGiven);
+  const change = Math.max(0, numericCash - grandTotal);
+
+  // Abort old requests when the tab or search term changes.
+  useEffect(() => {
+    if (activeTab !== 'pos' && activeTab !== 'products') return undefined;
+
+    const controller = new AbortController();
+
+    async function loadProducts() {
+      setLoadingProducts(true);
+      setError('');
+
+      try {
+        const query = encodeURIComponent(searchTerm.trim());
+        const data = await fetchJson(
+          `${API_BASE}/products?search=${query}`,
+          { signal: controller.signal }
+        );
+
+        setProducts(Array.isArray(data) ? data : data.products ?? []);
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          setProducts([]);
+          setError('Could not load products. Check that the backend is running.');
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoadingProducts(false);
+      }
+    }
+
+    loadProducts();
+    return () => controller.abort();
+  }, [activeTab, searchTerm]);
+
+  const loadSales = useCallback(async (signal) => {
+    setLoadingSales(true);
+    setError('');
+
+    try {
+      const data = await fetchJson(`${API_BASE}/sales`, { signal });
+      setSales(Array.isArray(data) ? data : data.sales ?? []);
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setSales([]);
+        setError('Could not load sales. Check that the backend is running.');
+      }
+    } finally {
+      if (!signal?.aborted) setLoadingSales(false);
+    }
+  }, []);
 
   useEffect(() => {
-    if (activeTab === 'pos') fetchProducts();
-  }, [searchTerm, activeTab]);
+    if (activeTab !== 'sales') return undefined;
 
-  const fetchProducts = () => {
-    fetch(`http://localhost:5000/api/products?search=${encodeURIComponent(searchTerm)}`)
-      .then(res => res.json())
-      .then(data => setProducts(data))
-      .catch(err => console.log('Server not running — start backend first'));
-  };
+    const controller = new AbortController();
+    loadSales(controller.signal);
+    return () => controller.abort();
+  }, [activeTab, loadSales]);
 
-  const addToCart = (product) => {
-    setCart(prev => {
-      const existing = prev.find(i => i.id === product.id);
-      if (existing) {
-        return prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
-      }
-      return [...prev, { ...product, qty: 1 }];
-    });
-    setSearchTerm('');
-    setTimeout(() => searchInput.current?.focus(), 50);
-  };
-
-  const removeFromCart = (index) => {
-    setCart(cart.filter((_, i) => i !== index));
-  };
-
-  const updateQty = (index, delta) => {
-    setCart(prev => {
-      const updated = [...prev];
-      updated[index].qty = Math.max(1, updated[index].qty + delta);
-      return updated;
-    });
-  };
-
-  const subtotal = cart.reduce((sum, item) => sum + Number(item.price) * item.qty, 0);
-  const grandTotal = Math.max(0, subtotal - discount);
-  const change = Number(cashGiven) - grandTotal;
-
-  const completeSale = async () => {
-    if (cart.length === 0) return alert('⚠️ Cart is empty!');
-    if (paymentMethod === 'Cash Payment' && (!cashGiven || Number(cashGiven) < grandTotal)) {
-      return alert('⚠️ Insufficient cash amount!');
+  function addToCart(product) {
+    if (product.id == null) {
+      setError('This product cannot be added because it has no ID.');
+      return;
     }
+
+    setError('');
+    setCart((current) => {
+      const existing = current.find((item) => item.id === product.id);
+
+      if (existing) {
+        return current.map((item) =>
+          item.id === product.id ? { ...item, qty: item.qty + 1 } : item
+        );
+      }
+
+      return [...current, { ...product, qty: 1 }];
+    });
+
+    setSearchTerm('');
+    setTimeout(() => searchInput.current?.focus(), 0);
+  }
+
+  function removeFromCart(productId) {
+    setCart((current) => current.filter((item) => item.id !== productId));
+  }
+
+  function updateQty(productId, delta) {
+    setCart((current) =>
+      current.map((item) =>
+        item.id === productId
+          ? { ...item, qty: Math.max(1, item.qty + delta) }
+          : item
+      )
+    );
+  }
+
+  function clearCart() {
+    setCart([]);
+    setDiscount(0);
+    setCashGiven('');
+    setError('');
+  }
+
+  async function completeSale() {
+    if (savingSaleRef.current) return;
+
+    if (cart.length === 0) {
+      setError('The cart is empty.');
+      return;
+    }
+
+    if (
+      paymentMethod === 'Cash Payment' &&
+      (!Number.isFinite(numericCash) || numericCash < grandTotal)
+    ) {
+      setError('Enter a valid cash amount that covers the total.');
+      return;
+    }
+
+    savingSaleRef.current = true;
+    setSavingSale(true);
+    setError('');
+
     try {
-      const res = await fetch('http://localhost:5000/api/sales', {
+      const data = await fetchJson(`${API_BASE}/sales`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -65,216 +170,385 @@ function App() {
           discount,
           grand_total: grandTotal,
           payment_method: paymentMethod,
-          cash_given: paymentMethod === 'Cash Payment' ? Number(cashGiven) : 0,
+          cash_given: paymentMethod === 'Cash Payment' ? numericCash : 0,
           change_amount: paymentMethod === 'Cash Payment' ? change : 0,
-          cashier: 'Shop Owner'
-        })
+          cashier: 'Shop Owner',
+        }),
       });
-      const data = await res.json();
-      if (data.success) {
-        alert(`✅ Sale Complete!\nInvoice: ${data.invoice_no}\nTotal: LKR ${grandTotal.toFixed(2)}${paymentMethod === 'Cash Payment' ? `\nChange: LKR ${change.toFixed(2)}` : ''}`);
-        setCart([]);
-        setDiscount(0);
-        setCashGiven('');
-        fetchSales();
-        searchInput.current?.focus();
+
+      if (!data.success) {
+        throw new Error(data.message || 'The sale was not accepted.');
       }
-    } catch (e) {
-      alert('❌ Failed to save sale — check if backend is running');
+
+      window.alert(
+        `Sale complete!\nInvoice: ${data.invoice_no ?? '—'}\nTotal: LKR ${grandTotal.toFixed(2)}${
+          paymentMethod === 'Cash Payment'
+            ? `\nChange: LKR ${change.toFixed(2)}`
+            : ''
+        }`
+      );
+
+      clearCart();
+      await loadSales();
+      searchInput.current?.focus();
+    } catch (err) {
+      setError(err.message || 'Failed to save the sale. Check the backend.');
+    } finally {
+      savingSaleRef.current = false;
+      setSavingSale(false);
     }
-  };
+  }
 
-  const fetchSales = () => {
-    fetch('http://localhost:5000/api/sales')
-      .then(res => res.json())
-      .then(data => setSales(data))
-      .catch(err => console.log('Server not running'));
+  const buttonStyle = {
+    padding: '10px 14px',
+    border: 0,
+    borderRadius: 6,
+    cursor: 'pointer',
   };
-
-  useEffect(() => {
-    if (activeTab === 'sales') fetchSales();
-  }, [activeTab]);
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', fontFamily: "'Segoe UI', sans-serif", background: '#f0f4f8' }}>
-      <div style={{ width: '240px', background: '#0f172a', color: 'white', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ padding: '20px', borderBottom: '1px solid #1e293b' }}>
-          <h2 style={{ margin: 0, fontSize: '18px', color: '#fbbf24' }}>SOLO LAB MOBILES</h2>
-          <p style={{ margin: '4px 0 0', fontSize: '12px', color: '#94a3b8' }}>POS Billing System</p>
-        </div>
-        <nav style={{ flex: 1, padding: '20px 10px' }}>
+    <div
+      style={{
+        display: 'flex',
+        minHeight: '100vh',
+        fontFamily: "'Segoe UI', sans-serif",
+        background: '#f0f4f8',
+      }}
+    >
+      <aside
+        style={{
+          width: 220,
+          padding: 20,
+          background: '#0f172a',
+          color: 'white',
+        }}
+      >
+        <h2 style={{ color: '#fbbf24', fontSize: 18 }}>SOLO LAB MOBILES</h2>
+        <p style={{ color: '#94a3b8', fontSize: 12 }}>POS Billing System</p>
+
+        <nav>
           {[
-            { id: 'pos', label: 'POS Billing', icon: '🛒' },
-            { id: 'sales', label: 'Sales History', icon: '📊' },
-            { id: 'products', label: 'Products', icon: '📦' },
-          ].map(tab => (
+            ['pos', '🛒 POS Billing'],
+            ['sales', '📊 Sales History'],
+            ['products', '📦 Products'],
+          ].map(([id, label]) => (
             <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              key={id}
+              type="button"
+              onClick={() => setActiveTab(id)}
               style={{
-                width: '100%', textAlign: 'left', padding: '12px 16px', marginBottom: '4px',
-                background: activeTab === tab.id ? '#1e40af' : 'transparent',
-                color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '14px'
+                ...buttonStyle,
+                display: 'block',
+                width: '100%',
+                marginBottom: 6,
+                textAlign: 'left',
+                color: 'white',
+                background: activeTab === id ? '#1e40af' : 'transparent',
               }}
             >
-              {tab.icon} {tab.label}
+              {label}
             </button>
           ))}
         </nav>
-      </div>
+      </aside>
 
-      <div style={{ flex: 1, padding: '24px', overflowY: 'auto' }}>
+      <main style={{ flex: 1, minWidth: 0, padding: 24, overflowY: 'auto' }}>
+        {error && (
+          <p role="alert" style={{ color: '#b91c1c' }}>
+            {error}
+          </p>
+        )}
+
         {activeTab === 'pos' && (
           <>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-              <h1 style={{ fontSize: '22px', color: '#1e293b', margin: 0 }}>POS Billing</h1>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button onClick={() => { setCart([]); setDiscount(0); setCashGiven(''); }} style={{ padding: '8px 16px', border: 'none', borderRadius: '6px', background: '#e2e8f0', cursor: 'pointer' }}>🔄 Clear</button>
-                <button style={{ padding: '8px 16px', border: 'none', borderRadius: '6px', background: '#ef4444', color: 'white', cursor: 'pointer' }}>Logout</button>
-              </div>
-            </div>
+            <header
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 20,
+              }}
+            >
+              <h1 style={{ margin: 0 }}>POS Billing</h1>
+              <button type="button" onClick={clearCart} style={buttonStyle}>
+                Clear cart
+              </button>
+            </header>
 
             <input
               ref={searchInput}
-              type="text"
-              placeholder="🔍 Scan barcode or search product name..."
+              type="search"
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Scan barcode or search product name..."
+              aria-label="Search products"
               style={{
-                width: '100%', padding: '14px 20px', fontSize: '16px', borderRadius: '10px', border: '2px solid #3b82f6',
-                outline: 'none', marginBottom: '24px', boxSizing: 'border-box'
+                boxSizing: 'border-box',
+                width: '100%',
+                padding: 14,
+                marginBottom: 20,
+                border: '2px solid #3b82f6',
+                borderRadius: 8,
+                fontSize: 16,
               }}
               autoFocus
             />
 
-            <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
-              <div style={{ flex: 2, minWidth: '400px' }}>
-                {searchTerm ? (
-                  products.length > 0 ? (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '16px' }}>
-                      {products.map(p => (
-                        <div key={p.id} onClick={() => addToCart(p)} style={{
-                          background: 'white', padding: '16px', borderRadius: '12px', cursor: 'pointer',
-                          boxShadow: '0 2px 8px rgba(0,0,0,0.08)', transition: 'transform 0.2s'
-                        }} onMouseOver={e => e.currentTarget.style.transform = 'scale(1.02)'}
-                           onMouseOut={e => e.currentTarget.style.transform = 'scale(1)'}>
-                          <p style={{ fontSize: '11px', color: '#94a3b8', margin: '0 0 4px' }}>{p.code || '—'}</p>
-                          <h3 style={{ margin: '0 0 8px', fontSize: '15px', color: '#1e293b' }}>{p.name}</h3>
-                          <p style={{ margin: 0, fontSize: '18px', fontWeight: 'bold', color: '#dc2626' }}>LKR {Number(p.price).toFixed(2)}</p>
-                          <p style={{ fontSize: '12px', color: '#64748b', margin: '8px 0 0' }}>Stock: {p.stock || 0}</p>
-                        </div>
+            <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+              <section style={{ flex: 1, minWidth: 280 }}>
+                {loadingProducts && <p>Loading products…</p>}
+
+                {searchTerm.trim() && !loadingProducts && (
+                  products.length ? (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))',
+                        gap: 12,
+                      }}
+                    >
+                      {products.map((product) => (
+                        <button
+                          key={product.id}
+                          type="button"
+                          onClick={() => addToCart(product)}
+                          style={{
+                            padding: 16,
+                            textAlign: 'left',
+                            background: 'white',
+                            border: 0,
+                            borderRadius: 10,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          <small>{product.code || '—'}</small>
+                          <h3>{product.name}</h3>
+                          <strong>
+                            LKR {Number(product.price || 0).toFixed(2)}
+                          </strong>
+                          <p>Stock: {product.stock ?? 0}</p>
+                        </button>
                       ))}
                     </div>
                   ) : (
-                    <div style={{ textAlign: 'center', padding: '60px', color: '#94a3b8' }}>
-                      <p style={{ fontSize: '40px' }}>🔍</p>
-                      <p>No products found matching "{searchTerm}"</p>
-                    </div>
+                    <p>No products found.</p>
                   )
-                ) : (
-                  <div style={{ textAlign: 'center', padding: '60px', color: '#94a3b8' }}>
-                    <p style={{ fontSize: '48px' }}>📱</p>
-                    <p style={{ fontSize: '18px', marginTop: '16px' }}>Ready for Scan or Search</p>
-                    <p style={{ fontSize: '14px' }}>Scan a product barcode or type the name/code above</p>
-                  </div>
                 )}
-              </div>
+              </section>
 
-              <div style={{ width: '380px', minWidth: '340px', background: 'white', borderRadius: '16px', padding: '24px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
-                <h3 style={{ margin: '0 0 16px', fontSize: '18px', color: '#1e293b' }}>🛍️ Invoice Summary</h3>
+              <section
+                style={{
+                  boxSizing: 'border-box',
+                  width: 380,
+                  maxWidth: '100%',
+                  padding: 20,
+                  background: 'white',
+                  borderRadius: 12,
+                }}
+              >
+                <h2>Invoice Summary</h2>
+
                 {cart.length === 0 ? (
-                  <p style={{ textAlign: 'center', color: '#94a3b8', padding: '30px 0' }}>Empty Cart</p>
+                  <p>Empty cart</p>
                 ) : (
-                  <div style={{ maxHeight: '240px', overflowY: 'auto', marginBottom: '16px' }}>
-                    {cart.map((item, i) => (
-                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
-                        <div style={{ flex: 1 }}>
-                          <p style={{ margin: 0, fontSize: '14px', fontWeight: 500 }}>{item.name}</p>
-                          <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>LKR {Number(item.price).toFixed(2)} × {item.qty}</p>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <button onClick={() => updateQty(i, -1)} style={{ width: '24px', height: '24px', border: 'none', borderRadius: '50%', background: '#e2e8f0', cursor: 'pointer' }}>−</button>
-                          <span style={{ width: '24px', textAlign: 'center', fontSize: '14px', fontWeight: 'bold' }}>{item.qty}</span>
-                          <button onClick={() => updateQty(i, 1)} style={{ width: '24px', height: '24px', border: 'none', borderRadius: '50%', background: '#e2e8f0', cursor: 'pointer' }}>+</button>
-                          <button onClick={() => removeFromCart(i)} style={{ marginLeft: '8px', border: 'none', background: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '18px' }}>×</button>
+                  cart.map((item) => (
+                    <div
+                      key={item.id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                        padding: '10px 0',
+                        borderBottom: '1px solid #e2e8f0',
+                      }}
+                    >
+                      <div>
+                        <strong>{item.name}</strong>
+                        <div>
+                          LKR {Number(item.price || 0).toFixed(2)} × {item.qty}
                         </div>
                       </div>
-                    ))}
-                  </div>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button
+                          type="button"
+                          aria-label={`Decrease quantity of ${item.name}`}
+                          onClick={() => updateQty(item.id, -1)}
+                        >
+                          −
+                        </button>
+                        <span>{item.qty}</span>
+                        <button
+                          type="button"
+                          aria-label={`Increase quantity of ${item.name}`}
+                          onClick={() => updateQty(item.id, 1)}
+                        >
+                          +
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Remove ${item.name}`}
+                          onClick={() => removeFromCart(item.id)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  ))
                 )}
 
-                <div style={{ borderTop: '2px solid #e2e8f0', paddingTop: '16px', marginBottom: '12px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
-                    <span>Subtotal</span>
-                    <span style={{ fontWeight: 500 }}>LKR {subtotal.toFixed(2)}</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0' }}>
-                    <span>Discount</span>
-                    <input
-                      type="number"
-                      value={discount}
-                      onChange={(e) => setDiscount(Math.max(0, Number(e.target.value) || 0))}
-                      style={{ width: '100px', textAlign: 'right', padding: '4px', border: '1px solid #cbd5e1', borderRadius: '4px' }}
-                      min="0"
-                    />
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', fontSize: '18px', fontWeight: 'bold', color: '#dc2626' }}>
-                    <span>Grand Total</span>
-                    <span>LKR {grandTotal.toFixed(2)}</span>
-                  </div>
-                </div>
+                <p>Subtotal: LKR {subtotal.toFixed(2)}</p>
 
-                <div style={{ marginBottom: '16px' }}>
-                  <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Payment Method</label>
+                <label>
+                  Discount
+                  <input
+                    type="number"
+                    min="0"
+                    max={subtotal}
+                    step="0.01"
+                    value={discount}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      setDiscount(
+                        Number.isFinite(value)
+                          ? Math.min(subtotal, Math.max(0, value))
+                          : 0
+                      );
+                    }}
+                    style={{ display: 'block', width: '100%', padding: 8 }}
+                  />
+                </label>
+
+                <h3>Grand total: LKR {grandTotal.toFixed(2)}</h3>
+
+                <label>
+                  Payment method
                   <select
                     value={paymentMethod}
-                    onChange={(e) => setPaymentMethod(e.target.value)}
-                    style={{ width: '100%', padding: '10px', border: '1px solid #cbd5e1', borderRadius: '6px', marginBottom: '12px' }}
+                    onChange={(event) => setPaymentMethod(event.target.value)}
+                    style={{ display: 'block', width: '100%', padding: 8 }}
                   >
                     <option>Cash Payment</option>
                     <option>Card Payment</option>
                   </select>
-                  {paymentMethod === 'Cash Payment' && (
-                    <>
-                      <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Cash Given</label>
-                      <input
-                        type="number"
-                        value={cashGiven}
-                        onChange={(e) => setCashGiven(e.target.value)}
-                        placeholder="Enter cash amount..."
-                        style={{ width: '100%', padding: '10px', border: '1px solid #cbd5e1', borderRadius: '6px', marginBottom: '8px' }}
-                      />
-                      {Number(cashGiven) >= grandTotal && grandTotal > 0 && (
-                        <p style={{ color: '#16a34a', fontWeight: 'bold', margin: 0 }}>Change: LKR {change.toFixed(2)}</p>
-                      )}
-                    </>
-                  )}
-                </div>
+                </label>
+
+                {paymentMethod === 'Cash Payment' && (
+                  <label>
+                    Cash given
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={cashGiven}
+                      onChange={(event) => setCashGiven(event.target.value)}
+                      style={{ display: 'block', width: '100%', padding: 8 }}
+                    />
+                    {numericCash >= grandTotal && grandTotal > 0 && (
+                      <span>Change: LKR {change.toFixed(2)}</span>
+                    )}
+                  </label>
+                )}
 
                 <button
+                  type="button"
                   onClick={completeSale}
+                  disabled={savingSale || grandTotal <= 0}
                   style={{
-                    width: '100%', padding: '14px', fontSize: '16px', fontWeight: 'bold',
-                    background: grandTotal > 0 ? '#16a34a' : '#cbd5e1',
-                    color: 'white', border: 'none', borderRadius: '10px', cursor: grandTotal > 0 ? 'pointer' : 'not-allowed'
+                    ...buttonStyle,
+                    width: '100%',
+                    marginTop: 16,
+                    color: 'white',
+                    background: savingSale || grandTotal <= 0 ? '#94a3b8' : '#16a34a',
                   }}
-                  disabled={grandTotal <= 0}
                 >
-                  ✅ Complete Sale
+                  {savingSale ? 'Saving…' : 'Complete sale'}
                 </button>
-              </div>
+              </section>
             </div>
           </>
         )}
 
-        {activeTab === 'sales' && (
-          <div>
-            <h2 style={{ fontSize: '22px', marginBottom: '20px' }}>📊 Sales History</h2>
-            {sales.length === 0 ? (
-              <p style={{ color: '#94a3b8' }}>No sales recorded yet</p>
+        {activeTab === 'products' && (
+          <section>
+            <h1>Products</h1>
+            {loadingProducts ? (
+              <p>Loading products…</p>
+            ) : products.length === 0 ? (
+              <p>No products found.</p>
             ) : (
               <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', background: 'white', borderRadius: '12px', overflow: 'hidden' }}>
+                <table style={{ width: '100%', background: 'white', borderCollapse: 'collapse' }}>
                   <thead>
-                    <tr style={{ background: '#f1f5f9' }}>
-                      <th style={{ padding: '1
+                    <tr>
+                      <th style={{ padding: 10, textAlign: 'left' }}>Code</th>
+                      <th style={{ padding: 10, textAlign: 'left' }}>Name</th>
+                      <th style={{ padding: 10, textAlign: 'right' }}>Price</th>
+                      <th style={{ padding: 10, textAlign: 'right' }}>Stock</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {products.map((product) => (
+                      <tr key={product.id}>
+                        <td style={{ padding: 10 }}>{product.code || '—'}</td>
+                        <td style={{ padding: 10 }}>{product.name}</td>
+                        <td style={{ padding: 10, textAlign: 'right' }}>
+                          LKR {Number(product.price || 0).toFixed(2)}
+                        </td>
+                        <td style={{ padding: 10, textAlign: 'right' }}>
+                          {product.stock ?? 0}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
+
+        {activeTab === 'sales' && (
+          <section>
+            <h1>Sales History</h1>
+            {loadingSales ? (
+              <p>Loading sales…</p>
+            ) : sales.length === 0 ? (
+              <p>No sales recorded yet.</p>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', background: 'white', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ padding: 10, textAlign: 'left' }}>Invoice #</th>
+                      <th style={{ padding: 10, textAlign: 'left' }}>Date/Time</th>
+                      <th style={{ padding: 10, textAlign: 'right' }}>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sales.map((sale, index) => (
+                      <tr key={sale.id ?? sale.invoice_no ?? index}>
+                        <td style={{ padding: 10 }}>
+                          {sale.invoice_no ?? '—'}
+                        </td>
+                        <td style={{ padding: 10 }}>
+                          {sale.created_at
+                            ? new Date(sale.created_at).toLocaleString()
+                            : '—'}
+                        </td>
+                        <td style={{ padding: 10, textAlign: 'right' }}>
+                          LKR {Number(sale.grand_total ?? sale.total ?? 0).toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}
+
+export default App;
