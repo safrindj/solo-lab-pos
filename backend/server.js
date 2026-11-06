@@ -159,32 +159,116 @@ async function initDatabase() {
 }
 initDatabase();
 
-// ========== API ROUTES ==========
+// Assumes db is a mysql2/promise connection or pool.
+// Ensure express.json() middleware is configured before these routes.
 
-// Get All Products
+function parseNonNegativeNumber(value, { fallback, integer = false } = {}) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  if (typeof value === 'string') {
+    value = value.trim();
+    if (value === '') {
+      return fallback;
+    }
+  }
+
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return null;
+  }
+
+  const number = Number(value);
+
+  if (
+    !Number.isFinite(number) ||
+    number < 0 ||
+    (integer && !Number.isInteger(number))
+  ) {
+    return null;
+  }
+
+  return number;
+}
+
+// Get all products
 app.get('/api/products', async (req, res) => {
   try {
-    const [products] = await db.query('SELECT * FROM products ORDER BY name');
-    res.json(products);
+    const [products] = await db.query(
+      'SELECT * FROM products ORDER BY name ASC'
+    );
+    return res.json(products);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('GET products error:', err);
+    return res.status(500).json({ error: 'Unable to retrieve products' });
   }
 });
 
-// Add New Product
+// Add a new product
 app.post('/api/products', async (req, res) => {
-  const { name, code, price, cost_price, stock, category } = req.body;
+  const body = req.body ?? {};
+
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const code = typeof body.code === 'string' ? body.code.trim() : '';
+
+  if (!name || !code || body.price === undefined || body.price === null) {
+    return res.status(400).json({
+      error: 'Name, code, and price are required',
+    });
+  }
+
+  // Zero is allowed; invalid or negative values are not.
+  const price = parseNonNegativeNumber(body.price);
+  const costPrice = parseNonNegativeNumber(body.cost_price, { fallback: 0 });
+  const stock = parseNonNegativeNumber(body.stock, {
+    fallback: 0,
+    integer: true,
+  });
+
+  if (price === null || costPrice === null || stock === null) {
+    return res.status(400).json({
+      error: 'Price and cost price must be non-negative numbers; stock must be a non-negative integer',
+    });
+  }
+
+  if (
+    body.category !== undefined &&
+    body.category !== null &&
+    typeof body.category !== 'string'
+  ) {
+    return res.status(400).json({ error: 'Category must be a string' });
+  }
+
+  const category =
+    typeof body.category === 'string' && body.category.trim()
+      ? body.category.trim()
+      : 'General';
+
   try {
     const [result] = await db.query(
       `INSERT INTO products (name, code, price, cost_price, stock, category)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [name, code, price, cost_price || 0, stock || 0, category || 'General']
+      [name, code, price, costPrice, stock, category]
     );
-    res.json({ success: true, id: result.insertId });
+
+    return res.status(201).json({
+      success: true,
+      id: result.insertId,
+      message: 'Product added successfully',
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('POST products error:', err);
+
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        error: 'This product code already exists — use a different one',
+      });
+    }
+
+    return res.status(500).json({ error: 'Unable to add product' });
   }
 });
+
 
 // Create Sale
 app.post('/api/sales', async (req, res) => {
