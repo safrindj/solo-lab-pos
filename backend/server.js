@@ -161,16 +161,29 @@ initDatabase();
 
 // ========== API ROUTES ==========
 
-// Products
+// Get All Products
 app.get('/api/products', async (req, res) => {
-  const search = req.query.search || '';
   try {
-    const [rows] = await db.query(
-      'SELECT * FROM products WHERE name LIKE ? OR code LIKE ? ORDER BY name',
-      [`%${search}%`, `%${search}%`]
+    const [products] = await db.query('SELECT * FROM products ORDER BY name');
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add New Product
+app.post('/api/products', async (req, res) => {
+  const { name, code, price, cost_price, stock, category } = req.body;
+  try {
+    const [result] = await db.query(
+      `INSERT INTO products (name, code, price, cost_price, stock, category)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [name, code, price, cost_price || 0, stock || 0, category || 'General']
     );
-    res.json(rows);
-  } catch (e) { res.status(500).json({error: e.message}); }
+    res.json({ success: true, id: result.insertId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Create Sale
