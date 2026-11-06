@@ -2,10 +2,9 @@ import { useCallback, useEffect, useState } from 'react';
 
 // Set VITE_API_BASE_URL in your deployment environment when the API is hosted
 // separately. Otherwise, production requests use the same-origin /api path.
-const API_BASE = (
-  import.meta.env.VITE_API_BASE_URL ||
-  (import.meta.env.DEV ? 'http://localhost:5000/api' : '/api')
-).replace(/\/$/, '');
+const API_BASE = import.meta.env.DEV
+  ? 'http://localhost:5000/api'
+  : 'https://YOUR-BACKEND-NAME.vercel.app/api';
 
 async function apiRequest(path, options) {
   const response = await fetch(`${API_BASE}${path}`, options);
