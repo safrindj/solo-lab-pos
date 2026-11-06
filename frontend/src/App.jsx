@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 const API_BASE = import.meta.env.DEV
   ? 'http://localhost:5000/api'
-  : 'https://solo-lab-pos-backend.vercel.app/api';
-
+  : 'https://ctdz-your-link.vercel.app/api'; 
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
 
