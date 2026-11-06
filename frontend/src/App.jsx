@@ -1,553 +1,530 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
-const API_BASE = import.meta.env.DEV
-  ? 'http://localhost:5000/api'
-  : 'https://ctdz-your-link.vercel.app/api'; 
-async function fetchJson(url, options) {
-  const response = await fetch(url, options);
+// Set VITE_API_BASE_URL in your deployment environment when the API is hosted
+// separately. Otherwise, production requests use the same-origin /api path.
+const API_BASE = (
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.DEV ? 'http://localhost:5000/api' : '/api')
+).replace(/\/$/, '');
 
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+async function apiRequest(path, options) {
+  const response = await fetch(`${API_BASE}${path}`, options);
+  const text = await response.text();
+
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error('The server returned an invalid response.');
+    }
   }
 
-  return response.json();
+  if (!response.ok) {
+    throw new Error(data?.message || `Request failed (${response.status}).`);
+  }
+
+  return data;
+}
+
+function getList(data, key) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.[key])) return data[key];
+  return [];
 }
 
 function App() {
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [dashboard, setDashboard] = useState({});
   const [products, setProducts] = useState([]);
+  const [sales, setSales] = useState([]);
+  const [customers, setCustomers] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [cart, setCart] = useState([]);
-  const [discount, setDiscount] = useState(0);
-  const [cashGiven, setCashGiven] = useState('');
+  const [discount, setDiscount] = useState('0');
   const [paymentMethod, setPaymentMethod] = useState('Cash Payment');
-  const [activeTab, setActiveTab] = useState('pos');
-  const [sales, setSales] = useState([]);
-  const [loadingProducts, setLoadingProducts] = useState(false);
-  const [loadingSales, setLoadingSales] = useState(false);
-  const [savingSale, setSavingSale] = useState(false);
+  const [cashGiven, setCashGiven] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [submittingSale, setSubmittingSale] = useState(false);
 
-  const searchInput = useRef(null);
-  const savingSaleRef = useRef(false);
+  const loadDashboard = useCallback(async () => {
+    try {
+      setError('');
+      setDashboard((await apiRequest('/dashboard')) || {});
+    } catch (err) {
+      setError(err.message);
+    }
+  }, []);
+
+  const loadProducts = useCallback(async () => {
+    try {
+      setError('');
+      setLoading(true);
+      const query = new URLSearchParams({ search: searchTerm });
+      setProducts(getList(await apiRequest(`/products?${query}`), 'products'));
+    } catch (err) {
+      setError(err.message);
+      setProducts([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [searchTerm]);
+
+  const loadSales = useCallback(async () => {
+    try {
+      setError('');
+      setLoading(true);
+      setSales(getList(await apiRequest('/sales'), 'sales'));
+    } catch (err) {
+      setError(err.message);
+      setSales([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadCustomers = useCallback(async () => {
+    try {
+      setError('');
+      setLoading(true);
+      setCustomers(getList(await apiRequest('/customers'), 'customers'));
+    } catch (err) {
+      setError(err.message);
+      setCustomers([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // A single effect handles tab loading and POS search changes.
+  useEffect(() => {
+    if (activeTab === 'dashboard') loadDashboard();
+    if (activeTab === 'pos' || activeTab === 'stock') loadProducts();
+    if (activeTab === 'sales') loadSales();
+    if (activeTab === 'customers') loadCustomers();
+  }, [
+    activeTab,
+    searchTerm,
+    loadDashboard,
+    loadProducts,
+    loadSales,
+    loadCustomers,
+  ]);
+
+  const addToCart = (product) => {
+    const productId = product.id ?? product.product_id;
+    if (productId == null) {
+      setError('This product has no ID and cannot be added to the cart.');
+      return;
+    }
+
+    setCart((previousCart) => {
+      const existing = previousCart.find(
+        (item) => (item.id ?? item.product_id) === productId
+      );
+
+      if (existing) {
+        return previousCart.map((item) =>
+          (item.id ?? item.product_id) === productId
+            ? { ...item, qty: item.qty + 1 }
+            : item
+        );
+      }
+
+      return [...previousCart, { ...product, qty: 1 }];
+    });
+  };
+
+  const removeFromCart = (productId) => {
+    setCart((previousCart) =>
+      previousCart.filter(
+        (item) => (item.id ?? item.product_id) !== productId
+      )
+    );
+  };
 
   const subtotal = cart.reduce(
     (sum, item) => sum + (Number(item.price) || 0) * item.qty,
     0
   );
-  const grandTotal = Math.max(0, subtotal - discount);
-  const numericCash = Number(cashGiven);
-  const change = Math.max(0, numericCash - grandTotal);
+  const discountAmount = Math.min(
+    subtotal,
+    Math.max(0, Number(discount) || 0)
+  );
+  const grandTotal = Math.max(0, subtotal - discountAmount);
+  const cashAmount = Math.max(0, Number(cashGiven) || 0);
+  const change = cashAmount - grandTotal;
 
-  // Abort old requests when the tab or search term changes.
-  useEffect(() => {
-    if (activeTab !== 'pos' && activeTab !== 'products') return undefined;
-
-    const controller = new AbortController();
-
-    async function loadProducts() {
-      setLoadingProducts(true);
-      setError('');
-
-      try {
-        const query = encodeURIComponent(searchTerm.trim());
-        const data = await fetchJson(
-          `${API_BASE}/products?search=${query}`,
-          { signal: controller.signal }
-        );
-
-        setProducts(Array.isArray(data) ? data : data.products ?? []);
-      } catch (err) {
-        if (err.name !== 'AbortError') {
-          setProducts([]);
-          setError('Could not load products. Check that the backend is running.');
-        }
-      } finally {
-        if (!controller.signal.aborted) setLoadingProducts(false);
-      }
-    }
-
-    loadProducts();
-    return () => controller.abort();
-  }, [activeTab, searchTerm]);
-
-  const loadSales = useCallback(async (signal) => {
-    setLoadingSales(true);
+  const completeSale = async () => {
     setError('');
-
-    try {
-      const data = await fetchJson(`${API_BASE}/sales`, { signal });
-      setSales(Array.isArray(data) ? data : data.sales ?? []);
-    } catch (err) {
-      if (err.name !== 'AbortError') {
-        setSales([]);
-        setError('Could not load sales. Check that the backend is running.');
-      }
-    } finally {
-      if (!signal?.aborted) setLoadingSales(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (activeTab !== 'sales') return undefined;
-
-    const controller = new AbortController();
-    loadSales(controller.signal);
-    return () => controller.abort();
-  }, [activeTab, loadSales]);
-
-  function addToCart(product) {
-    if (product.id == null) {
-      setError('This product cannot be added because it has no ID.');
-      return;
-    }
-
-    setError('');
-    setCart((current) => {
-      const existing = current.find((item) => item.id === product.id);
-
-      if (existing) {
-        return current.map((item) =>
-          item.id === product.id ? { ...item, qty: item.qty + 1 } : item
-        );
-      }
-
-      return [...current, { ...product, qty: 1 }];
-    });
-
-    setSearchTerm('');
-    setTimeout(() => searchInput.current?.focus(), 0);
-  }
-
-  function removeFromCart(productId) {
-    setCart((current) => current.filter((item) => item.id !== productId));
-  }
-
-  function updateQty(productId, delta) {
-    setCart((current) =>
-      current.map((item) =>
-        item.id === productId
-          ? { ...item, qty: Math.max(1, item.qty + delta) }
-          : item
-      )
-    );
-  }
-
-  function clearCart() {
-    setCart([]);
-    setDiscount(0);
-    setCashGiven('');
-    setError('');
-  }
-
-  async function completeSale() {
-    if (savingSaleRef.current) return;
 
     if (cart.length === 0) {
-      setError('The cart is empty.');
+      setError('Add at least one product before completing a sale.');
       return;
     }
 
-    if (
-      paymentMethod === 'Cash Payment' &&
-      (!Number.isFinite(numericCash) || numericCash < grandTotal)
-    ) {
-      setError('Enter a valid cash amount that covers the total.');
+    if (paymentMethod === 'Cash Payment' && cashAmount < grandTotal) {
+      setError('Cash received must be at least the total amount due.');
       return;
     }
-
-    savingSaleRef.current = true;
-    setSavingSale(true);
-    setError('');
 
     try {
-      const data = await fetchJson(`${API_BASE}/sales`, {
+      setSubmittingSale(true);
+      await apiRequest('/sales', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           items: cart,
           subtotal,
-          discount,
+          discount: discountAmount,
           grand_total: grandTotal,
           payment_method: paymentMethod,
-          cash_given: paymentMethod === 'Cash Payment' ? numericCash : 0,
+          cash_given: paymentMethod === 'Cash Payment' ? cashAmount : 0,
           change_amount: paymentMethod === 'Cash Payment' ? change : 0,
-          cashier: 'Shop Owner',
+          cashier: 'Admin',
         }),
       });
 
-      if (!data.success) {
-        throw new Error(data.message || 'The sale was not accepted.');
-      }
+      window.alert('Sale completed successfully.');
+      setCart([]);
+      setDiscount('0');
+      setCashGiven('');
 
-      window.alert(
-        `Sale complete!\nInvoice: ${data.invoice_no ?? '—'}\nTotal: LKR ${grandTotal.toFixed(2)}${
-          paymentMethod === 'Cash Payment'
-            ? `\nChange: LKR ${change.toFixed(2)}`
-            : ''
-        }`
-      );
-
-      clearCart();
-      await loadSales();
-      searchInput.current?.focus();
+      // Refresh dashboard figures after a successful sale.
+      if (activeTab === 'dashboard') await loadDashboard();
     } catch (err) {
-      setError(err.message || 'Failed to save the sale. Check the backend.');
+      setError(err.message);
     } finally {
-      savingSaleRef.current = false;
-      setSavingSale(false);
+      setSubmittingSale(false);
     }
-  }
-
-  const buttonStyle = {
-    padding: '10px 14px',
-    border: 0,
-    borderRadius: 6,
-    cursor: 'pointer',
   };
+
+  const money = (value) =>
+    `Rs. ${(Number(value) || 0).toLocaleString()}`;
+
+  const buttonStyle = (selected = false) => ({
+    width: '100%',
+    textAlign: 'left',
+    padding: '14px 24px',
+    border: 'none',
+    background: selected ? '#1e40af' : 'transparent',
+    color: 'white',
+    cursor: 'pointer',
+    fontSize: '14px',
+  });
 
   return (
     <div
       style={{
         display: 'flex',
         minHeight: '100vh',
-        fontFamily: "'Segoe UI', sans-serif",
-        background: '#f0f4f8',
+        fontFamily: 'system-ui, sans-serif',
       }}
     >
       <aside
         style={{
-          width: 220,
-          padding: 20,
+          width: '260px',
+          flexShrink: 0,
           background: '#0f172a',
           color: 'white',
+          padding: '20px 0',
         }}
       >
-        <h2 style={{ color: '#fbbf24', fontSize: 18 }}>SOLO LAB MOBILES</h2>
-        <p style={{ color: '#94a3b8', fontSize: 12 }}>POS Billing System</p>
+        <div
+          style={{
+            padding: '0 20px 30px',
+            borderBottom: '1px solid #334155',
+            marginBottom: '20px',
+          }}
+        >
+          <h2 style={{ margin: 0, fontSize: '18px' }}>SOLO LAB MOBILES</h2>
+          <p style={{ margin: 0, color: '#94a3b8', fontSize: '12px' }}>
+            POS Management System
+          </p>
+        </div>
 
-        <nav>
-          {[
-            ['pos', '🛒 POS Billing'],
-            ['sales', '📊 Sales History'],
-            ['products', '📦 Products'],
-          ].map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setActiveTab(id)}
-              style={{
-                ...buttonStyle,
-                display: 'block',
-                width: '100%',
-                marginBottom: 6,
-                textAlign: 'left',
-                color: 'white',
-                background: activeTab === id ? '#1e40af' : 'transparent',
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
+        {[
+          { id: 'dashboard', label: 'Dashboard', icon: '📊' },
+          { id: 'pos', label: 'POS Billing', icon: '🛒' },
+          { id: 'sales', label: 'Sales History', icon: '📋' },
+          { id: 'customers', label: 'Customer Management', icon: '👥' },
+          { id: 'stock', label: 'Inventory', icon: '📦' },
+        ].map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setActiveTab(item.id)}
+            style={buttonStyle(activeTab === item.id)}
+          >
+            <span aria-hidden="true">{item.icon}</span> {item.label}
+          </button>
+        ))}
       </aside>
 
-      <main style={{ flex: 1, minWidth: 0, padding: 24, overflowY: 'auto' }}>
+      <main
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: '30px',
+          background: '#f8fafc',
+        }}
+      >
         {error && (
-          <p role="alert" style={{ color: '#b91c1c' }}>
+          <div
+            role="alert"
+            style={{
+              padding: '12px 16px',
+              marginBottom: '20px',
+              color: '#991b1b',
+              background: '#fee2e2',
+              borderRadius: '8px',
+            }}
+          >
             {error}
-          </p>
+          </div>
+        )}
+
+        {loading && <p role="status">Loading…</p>}
+
+        {activeTab === 'dashboard' && (
+          <section>
+            <h1 style={{ fontSize: '28px', marginBottom: '5px' }}>
+              Dashboard
+            </h1>
+            <p style={{ color: '#64748b', marginBottom: '30px' }}>
+              Business overview
+            </p>
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                gap: '20px',
+              }}
+            >
+              <div style={cardStyle}>
+                <h3 style={cardHeadingStyle}>TODAY&apos;S INVOICES</h3>
+                <p style={metricStyle}>
+                  {dashboard.todayInvoices ?? dashboard.today_invoices ?? 0}
+                </p>
+              </div>
+              <div style={cardStyle}>
+                <h3 style={cardHeadingStyle}>GROSS EARNINGS</h3>
+                <p style={metricStyle}>
+                  {money(dashboard.todayRevenue ?? dashboard.today_revenue)}
+                </p>
+              </div>
+              <div style={cardStyle}>
+                <h3 style={cardHeadingStyle}>TOTAL CUSTOMERS</h3>
+                <p style={metricStyle}>
+                  {dashboard.totalCustomers ?? dashboard.total_customers ?? 0}
+                </p>
+              </div>
+            </div>
+          </section>
         )}
 
         {activeTab === 'pos' && (
-          <>
-            <header
+          <section>
+            <h1>POS Billing</h1>
+            <label>
+              Search products{' '}
+              <input
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                placeholder="Search by product name"
+              />
+            </label>
+
+            <div
               style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 20,
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+                gap: '24px',
+                marginTop: '20px',
               }}
             >
-              <h1 style={{ margin: 0 }}>POS Billing</h1>
-              <button type="button" onClick={clearCart} style={buttonStyle}>
-                Clear cart
-              </button>
-            </header>
+              <div>
+                <h2>Products</h2>
+                {products.map((product) => (
+                  <div key={product.id ?? product.product_id} style={rowStyle}>
+                    <span>
+                      {product.name ?? product.product_name ?? 'Unnamed product'}
+                      {' — '}
+                      {money(product.price)}
+                    </span>
+                    <button type="button" onClick={() => addToCart(product)}>
+                      Add
+                    </button>
+                  </div>
+                ))}
+                {!loading && products.length === 0 && <p>No products found.</p>}
+              </div>
 
-            <input
-              ref={searchInput}
-              type="search"
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder="Scan barcode or search product name..."
-              aria-label="Search products"
-              style={{
-                boxSizing: 'border-box',
-                width: '100%',
-                padding: 14,
-                marginBottom: 20,
-                border: '2px solid #3b82f6',
-                borderRadius: 8,
-                fontSize: 16,
-              }}
-              autoFocus
-            />
-
-            <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-              <section style={{ flex: 1, minWidth: 280 }}>
-                {loadingProducts && <p>Loading products…</p>}
-
-                {searchTerm.trim() && !loadingProducts && (
-                  products.length ? (
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))',
-                        gap: 12,
-                      }}
-                    >
-                      {products.map((product) => (
-                        <button
-                          key={product.id}
-                          type="button"
-                          onClick={() => addToCart(product)}
-                          style={{
-                            padding: 16,
-                            textAlign: 'left',
-                            background: 'white',
-                            border: 0,
-                            borderRadius: 10,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          <small>{product.code || '—'}</small>
-                          <h3>{product.name}</h3>
-                          <strong>
-                            LKR {Number(product.price || 0).toFixed(2)}
-                          </strong>
-                          <p>Stock: {product.stock ?? 0}</p>
-                        </button>
-                      ))}
+              <div>
+                <h2>Cart</h2>
+                {cart.map((item) => {
+                  const id = item.id ?? item.product_id;
+                  return (
+                    <div key={id} style={rowStyle}>
+                      <span>
+                        {item.name ?? item.product_name ?? 'Product'} × {item.qty}
+                      </span>
+                      <span>{money((Number(item.price) || 0) * item.qty)}</span>
+                      <button type="button" onClick={() => removeFromCart(id)}>
+                        Remove
+                      </button>
                     </div>
-                  ) : (
-                    <p>No products found.</p>
-                  )
-                )}
-              </section>
+                  );
+                })}
 
-              <section
-                style={{
-                  boxSizing: 'border-box',
-                  width: 380,
-                  maxWidth: '100%',
-                  padding: 20,
-                  background: 'white',
-                  borderRadius: 12,
-                }}
-              >
-                <h2>Invoice Summary</h2>
-
-                {cart.length === 0 ? (
-                  <p>Empty cart</p>
-                ) : (
-                  cart.map((item) => (
-                    <div
-                      key={item.id}
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: 8,
-                        padding: '10px 0',
-                        borderBottom: '1px solid #e2e8f0',
-                      }}
-                    >
-                      <div>
-                        <strong>{item.name}</strong>
-                        <div>
-                          LKR {Number(item.price || 0).toFixed(2)} × {item.qty}
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', gap: 4 }}>
-                        <button
-                          type="button"
-                          aria-label={`Decrease quantity of ${item.name}`}
-                          onClick={() => updateQty(item.id, -1)}
-                        >
-                          −
-                        </button>
-                        <span>{item.qty}</span>
-                        <button
-                          type="button"
-                          aria-label={`Increase quantity of ${item.name}`}
-                          onClick={() => updateQty(item.id, 1)}
-                        >
-                          +
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={`Remove ${item.name}`}
-                          onClick={() => removeFromCart(item.id)}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-
-                <p>Subtotal: LKR {subtotal.toFixed(2)}</p>
-
+                <p>Subtotal: {money(subtotal)}</p>
                 <label>
-                  Discount
+                  Discount amount:{' '}
                   <input
                     type="number"
                     min="0"
                     max={subtotal}
                     step="0.01"
                     value={discount}
-                    onChange={(event) => {
-                      const value = Number(event.target.value);
-                      setDiscount(
-                        Number.isFinite(value)
-                          ? Math.min(subtotal, Math.max(0, value))
-                          : 0
-                      );
-                    }}
-                    style={{ display: 'block', width: '100%', padding: 8 }}
+                    onChange={(event) => setDiscount(event.target.value)}
                   />
                 </label>
-
-                <h3>Grand total: LKR {grandTotal.toFixed(2)}</h3>
+                <p>Total: {money(grandTotal)}</p>
 
                 <label>
-                  Payment method
+                  Payment method:{' '}
                   <select
                     value={paymentMethod}
                     onChange={(event) => setPaymentMethod(event.target.value)}
-                    style={{ display: 'block', width: '100%', padding: 8 }}
                   >
                     <option>Cash Payment</option>
                     <option>Card Payment</option>
+                    <option>Other</option>
                   </select>
                 </label>
 
                 {paymentMethod === 'Cash Payment' && (
-                  <label>
-                    Cash given
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={cashGiven}
-                      onChange={(event) => setCashGiven(event.target.value)}
-                      style={{ display: 'block', width: '100%', padding: 8 }}
-                    />
-                    {numericCash >= grandTotal && grandTotal > 0 && (
-                      <span>Change: LKR {change.toFixed(2)}</span>
-                    )}
-                  </label>
+                  <>
+                    <div>
+                      <label>
+                        Cash received:{' '}
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={cashGiven}
+                          onChange={(event) => setCashGiven(event.target.value)}
+                        />
+                      </label>
+                    </div>
+                    <p>Change: {money(Math.max(0, change))}</p>
+                  </>
                 )}
 
                 <button
                   type="button"
+                  disabled={submittingSale || cart.length === 0}
                   onClick={completeSale}
-                  disabled={savingSale || grandTotal <= 0}
-                  style={{
-                    ...buttonStyle,
-                    width: '100%',
-                    marginTop: 16,
-                    color: 'white',
-                    background: savingSale || grandTotal <= 0 ? '#94a3b8' : '#16a34a',
-                  }}
                 >
-                  {savingSale ? 'Saving…' : 'Complete sale'}
+                  {submittingSale ? 'Processing…' : 'Complete Sale'}
                 </button>
-              </section>
-            </div>
-          </>
-        )}
-
-        {activeTab === 'products' && (
-          <section>
-            <h1>Products</h1>
-            {loadingProducts ? (
-              <p>Loading products…</p>
-            ) : products.length === 0 ? (
-              <p>No products found.</p>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', background: 'white', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr>
-                      <th style={{ padding: 10, textAlign: 'left' }}>Code</th>
-                      <th style={{ padding: 10, textAlign: 'left' }}>Name</th>
-                      <th style={{ padding: 10, textAlign: 'right' }}>Price</th>
-                      <th style={{ padding: 10, textAlign: 'right' }}>Stock</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {products.map((product) => (
-                      <tr key={product.id}>
-                        <td style={{ padding: 10 }}>{product.code || '—'}</td>
-                        <td style={{ padding: 10 }}>{product.name}</td>
-                        <td style={{ padding: 10, textAlign: 'right' }}>
-                          LKR {Number(product.price || 0).toFixed(2)}
-                        </td>
-                        <td style={{ padding: 10, textAlign: 'right' }}>
-                          {product.stock ?? 0}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
               </div>
-            )}
+            </div>
           </section>
         )}
 
         {activeTab === 'sales' && (
           <section>
             <h1>Sales History</h1>
-            {loadingSales ? (
-              <p>Loading sales…</p>
-            ) : sales.length === 0 ? (
-              <p>No sales recorded yet.</p>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', background: 'white', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr>
-                      <th style={{ padding: 10, textAlign: 'left' }}>Invoice #</th>
-                      <th style={{ padding: 10, textAlign: 'left' }}>Date/Time</th>
-                      <th style={{ padding: 10, textAlign: 'right' }}>Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sales.map((sale, index) => (
-                      <tr key={sale.id ?? sale.invoice_no ?? index}>
-                        <td style={{ padding: 10 }}>
-                          {sale.invoice_no ?? '—'}
-                        </td>
-                        <td style={{ padding: 10 }}>
-                          {sale.created_at
-                            ? new Date(sale.created_at).toLocaleString()
-                            : '—'}
-                        </td>
-                        <td style={{ padding: 10, textAlign: 'right' }}>
-                          LKR {Number(sale.grand_total ?? sale.total ?? 0).toFixed(2)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            {sales.map((sale, index) => (
+              <div key={sale.id ?? sale.sale_id ?? index} style={rowStyle}>
+                <span>
+                  Sale #{sale.id ?? sale.sale_id ?? index + 1}
+                </span>
+                <span>
+                  {money(sale.grand_total ?? sale.total ?? sale.amount)}
+                </span>
+                <span>{sale.payment_method ?? ''}</span>
               </div>
-            )}
+            ))}
+            {!loading && sales.length === 0 && <p>No sales found.</p>}
+          </section>
+        )}
+
+        {activeTab === 'customers' && (
+          <section>
+            <h1>Customers</h1>
+            {customers.map((customer, index) => (
+              <div
+                key={customer.id ?? customer.customer_id ?? index}
+                style={rowStyle}
+              >
+                <span>
+                  {customer.name ?? customer.customer_name ?? 'Unnamed customer'}
+                </span>
+                <span>{customer.phone ?? customer.email ?? ''}</span>
+              </div>
+            ))}
+            {!loading && customers.length === 0 && <p>No customers found.</p>}
+          </section>
+        )}
+
+        {activeTab === 'stock' && (
+          <section>
+            <h1>Inventory</h1>
+            {products.map((product, index) => (
+              <div
+                key={product.id ?? product.product_id ?? index}
+                style={rowStyle}
+              >
+                <span>
+                  {product.name ?? product.product_name ?? 'Unnamed product'}
+                </span>
+                <span>Price: {money(product.price)}</span>
+                <span>
+                  Stock: {product.stock ?? product.quantity ?? 'Not provided'}
+                </span>
+              </div>
+            ))}
+            {!loading && products.length === 0 && <p>No inventory found.</p>}
           </section>
         )}
       </main>
     </div>
   );
 }
+
+const cardStyle = {
+  background: 'white',
+  padding: '25px',
+  borderRadius: '12px',
+  boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+};
+
+const cardHeadingStyle = {
+  color: '#64748b',
+  fontSize: '14px',
+  margin: 0,
+};
+
+const metricStyle = {
+  fontSize: '30px',
+  fontWeight: 'bold',
+  margin: '10px 0',
+};
+
+const rowStyle = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  gap: '12px',
+  padding: '12px',
+  marginBottom: '8px',
+  background: 'white',
+  borderRadius: '8px',
+};
 
 export default App;
